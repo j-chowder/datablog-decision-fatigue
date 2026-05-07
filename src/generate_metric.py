@@ -12,13 +12,15 @@ STOCKFISH_PATH = "stockfish-windows-x86-64-avx2.exe"   # update if needed
 DEPTH = 12                     # increase later if needed
 
 engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
-df = pd.read_csv('data/raw/data.csv')
+df = pd.read_csv('./data/raw/data.csv')
+start_idx = df.index[df['id'] == '8c3usY4b'][0]
+df = df.loc[start_idx:] 
 
 # ----------------------------
-# SAFE SCORE HANDLER
+# SAFE SCORE
 # ----------------------------
 def safe_score(score):
-    # Converts mate scores to large centipawn values
+    # Convert mate scores to large centipawn values
     if score.is_mate():
         return 10000 if score.mate() > 0 else -10000
     return score.score()
@@ -27,7 +29,6 @@ def safe_score(score):
 # CORE FUNCTION (ONE GAME)
 # ----------------------------
 def evaluate_game(game_id, moves_str, white_id, black_id, depth=DEPTH, cache=None):
-    print('evaluating')
     board = chess.Board()
     moves = moves_str.split()
 
@@ -48,6 +49,7 @@ def evaluate_game(game_id, moves_str, white_id, black_id, depth=DEPTH, cache=Non
         player_move_number = (move_number + 1) // 2
 
         fen_before = board.fen()
+        turn = board.turn  # ✅ CRITICAL FIX: perspective
 
         # ----------------------------
         # GET BEST + SECOND BEST (CACHE)
@@ -62,8 +64,8 @@ def evaluate_game(game_id, moves_str, white_id, black_id, depth=DEPTH, cache=Non
                     multipv=2
                 )
 
-                best_eval = safe_score(info[0]["score"].white())
-                second_eval = safe_score(info[1]["score"].white())
+                best_eval = safe_score(info[0]["score"].pov(turn))
+                second_eval = safe_score(info[1]["score"].pov(turn))
 
                 if cache is not None:
                     cache[fen_before] = (best_eval, second_eval)
@@ -87,15 +89,22 @@ def evaluate_game(game_id, moves_str, white_id, black_id, depth=DEPTH, cache=Non
                 board,
                 chess.engine.Limit(depth=depth)
             )
-            played_eval = safe_score(info_after["score"].white())
+            played_eval = safe_score(info_after["score"].pov(turn))
         except:
             continue
 
         # ----------------------------
         # METRICS
         # ----------------------------
-        cpl = best_eval - played_eval
-        difficulty = abs(best_eval - second_eval)
+        cpl_raw = best_eval - played_eval
+        cpl = max(0, cpl_raw)  # ✅ ensure non-negative
+
+        # Optional: cap extreme noise (recommended)
+        cpl = min(cpl, 1000)
+
+        difficulty = best_eval - second_eval  # ✅ already ordered
+        difficulty = min(difficulty, 1000)
+
         is_blunder = int(cpl > 100)
 
         rows.append({
@@ -115,11 +124,9 @@ def evaluate_game(game_id, moves_str, white_id, black_id, depth=DEPTH, cache=Non
 # ----------------------------
 # MAIN PIPELINE (ALL GAMES)
 # ----------------------------
-print(df.info())
-def evaluate_dataframe(df, output_file="data/processed/move_level_data.csv"):
+def evaluate_dataframe(df, output_file="./data/processed/move_level_data_v2.csv"):
     cache = {}
 
-    # If file doesn't exist, write header
     write_header = not os.path.exists(output_file)
 
     for idx, row in df.iterrows():
@@ -136,7 +143,6 @@ def evaluate_dataframe(df, output_file="data/processed/move_level_data.csv"):
 
         temp_df = pd.DataFrame(result)
 
-        # Append to CSV
         temp_df.to_csv(
             output_file,
             mode="a",
@@ -144,9 +150,8 @@ def evaluate_dataframe(df, output_file="data/processed/move_level_data.csv"):
             index=False
         )
 
-        write_header = False  # only write header once
+        write_header = False
 
-        # Optional: progress log
         if idx % 100 == 0:
             print(f"Processed {idx} games")
 
